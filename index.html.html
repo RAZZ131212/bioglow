@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="et">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BioGlow – tasuta taimetuvastus</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+body{font-family:Arial,sans-serif;background:#f4f8f3;margin:0;color:#17351f}
+.wrap{max-width:1100px;margin:auto;padding:24px}
+h1{margin-bottom:6px}.sub{color:#54705b}
+.card{background:white;border-radius:16px;padding:18px;margin:16px 0;box-shadow:0 2px 12px #0001}
+input,button{padding:11px;border-radius:9px;border:1px solid #b9c9bc;font-size:15px}
+button{cursor:pointer;background:#e9f3ea}.drop{border:2px dashed #7fa48a;padding:35px;text-align:center;border-radius:14px}
+#map{height:420px;border-radius:12px}.status{padding:10px;border-radius:9px;background:#eef5ef;margin-top:12px}
+table{width:100%;border-collapse:collapse}td,th{padding:9px;border-bottom:1px solid #ddd;text-align:left}img.thumb{width:90px;height:60px;object-fit:cover;border-radius:7px}
+.warn{background:#fff4d6;padding:12px;border-radius:10px}
+.red{font-weight:bold}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>🌿 BioGlow – tasuta taimetuvastus</h1>
+<div class="sub">DJI pildid → Pl@ntNet AI → võimalik võõrliik → GPS-kaart</div>
+
+<div class="card">
+<h2>1. Tasuta Pl@ntNet API võti</h2>
+<p>Pl@ntNeti tasuta plaan lubab praegu kuni <b>500 tuvastust päevas</b>. Loo konto ja võta API võti.</p>
+<p><a href="https://my.plantnet.org/signup" target="_blank">Ava tasuta Pl@ntNet konto ↗</a></p>
+<input id="key" type="password" placeholder="Sisesta Pl@ntNet API key" style="width:min(600px,90%)">
+<button onclick="saveKey()">Salvesta</button>
+<button onclick="clearKey()">Kustuta</button>
+<div id="keyStatus" class="status"></div>
+</div>
+
+<div class="card">
+<h2>2. Lisa DJI pildid</h2>
+<div id="drop" class="drop">Lohista siia JPG/JPEG pildid<br>või<br><input id="files" type="file" accept="image/jpeg,image/jpg" multiple></div>
+<div id="status" class="status">Pilte pole veel lisatud.</div>
+</div>
+
+<div class="card">
+<h2>3. Kaart</h2>
+<div id="map"></div>
+<p class="sub">Punane punkt = AI leidis meie nimekirjast võimaliku võõrliigi. See on prototüübi hinnang, mitte kindel määrang.</p>
+</div>
+
+<div class="card">
+<h2>Tulemused</h2>
+<table><thead><tr><th>Pilt</th><th>AI tulemus</th><th>Võõrliik?</th><th>GPS</th></tr></thead><tbody id="results"></tbody></table>
+</div>
+
+<div class="card warn">
+<b>Oluline:</b> AI võib taime valesti tuvastada. Kasuta tulemust kui „võimalik võõrliik” ja kontrolli kahtlased leiud üle.
+</div>
+</div>
+
+<script src="https://unpkg.com/exifr/dist/lite.umd.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const invasive = [
+["Heracleum mantegazzianum","hiid-karuputk"],
+["Heracleum sosnowskyi","Sosnovski karuputk"],
+["Impatiens glandulifera","verev lemmalts"],
+["Solidago canadensis","Kanada kuldvits"],
+["Solidago gigantea","sügis-kuldvits"],
+["Reynoutria japonica","vooljas pargitatar"],
+["Fallopia japonica","vooljas pargitatar"],
+["Reynoutria sachalinensis","sahhalini pargitatar"],
+["Fallopia sachalinensis","sahhalini pargitatar"],
+["Reynoutria × bohemica","pargitatra hübriid"],
+["Reynoutria bohemica","pargitatra hübriid"],
+["Ambrosia artemisiifolia","süstlehine ambroosia"],
+["Ambrosia trifida","kolmehõlmaline ambroosia"],
+["Bidens frondosa","ameerika ruse"]
+];
+
+let map=L.map('map').setView([58.6,25.0],7);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap'}).addTo(map);
+let markers=[];
+let files=[];
+
+function saveKey(){
+ const k=document.getElementById('key').value.trim();
+ localStorage.setItem('bioglow_plantnet_key',k);
+ document.getElementById('keyStatus').textContent=k?'API võti salvestatud sellesse brauserisse.':'API võtit ei sisestatud.';
+}
+function clearKey(){localStorage.removeItem('bioglow_plantnet_key');document.getElementById('key').value='';document.getElementById('keyStatus').textContent='API võti kustutatud.'}
+const saved=localStorage.getItem('bioglow_plantnet_key');
+if(saved){document.getElementById('key').value=saved;document.getElementById('keyStatus').textContent='API võti on olemas.'}
+
+const drop=document.getElementById('drop'), input=document.getElementById('files');
+drop.addEventListener('dragover',e=>{e.preventDefault();drop.style.background='#edf6ee'});
+drop.addEventListener('dragleave',()=>drop.style.background='');
+drop.addEventListener('drop',e=>{e.preventDefault();drop.style.background='';handleFiles([...e.dataTransfer.files])});
+input.addEventListener('change',()=>handleFiles([...input.files]));
+
+function isInvasive(name){
+ const n=(name||'').toLowerCase();
+ return invasive.find(([s,c])=>n.includes(s.toLowerCase())) || invasive.find(([s,c])=>n.includes(c.toLowerCase()));
+}
+function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+
+async function handleFiles(fs){
+ const imgs=fs.filter(f=>/jpe?g$/i.test(f.name));
+ if(!imgs.length){document.getElementById('status').textContent='Lisa JPG/JPEG failid.';return}
+ files=imgs;
+ document.getElementById('status').textContent=`Leitud ${imgs.length} pilti. Alustan tuvastamist...`;
+ for(const f of imgs) await identify(f);
+ document.getElementById('status').textContent=`Valmis. Töödeldud ${imgs.length} pilti.`;
+}
+
+async function identify(file){
+ const key=localStorage.getItem('bioglow_plantnet_key')||document.getElementById('key').value.trim();
+ const row=document.createElement('tr');
+ const url=URL.createObjectURL(file);
+ row.innerHTML=`<td><img class="thumb" src="${url}"><br>${esc(file.name)}</td><td>⏳ töötlen...</td><td>–</td><td>⏳</td>`;
+ document.getElementById('results').appendChild(row);
+
+ let exif={};
+ try{exif=await exifr.parse(file,{gps:true,make:true,model:true});}catch(e){}
+ const gps=(exif.latitude!=null&&exif.longitude!=null)?[exif.latitude,exif.longitude]:null;
+ const drone=[exif.make,exif.model].filter(Boolean).join(' ')||'tundmatu';
+ row.cells[3].textContent=gps?`${gps[0].toFixed(5)}, ${gps[1].toFixed(5)} (${drone})`:`GPS puudub (${drone})`;
+
+ if(!key){
+   row.cells[1].textContent='API võti puudub';
+   document.getElementById('status').textContent='Sisesta tasuta Pl@ntNet API võti.';
+   return;
+ }
+
+ const fd=new FormData();
+ fd.append('images',file);
+ fd.append('organs','auto');
+ const endpoint='https://my-api.plantnet.org/v2/identify/all?api-key='+encodeURIComponent(key)+'&lang=et&nb-results=5';
+ try{
+   const r=await fetch(endpoint,{method:'POST',body:fd});
+   const data=await r.json();
+   if(!r.ok) throw new Error(data?.message||data?.error||`HTTP ${r.status}`);
+   const best=data.results?.[0];
+   if(!best){
+     row.cells[1].textContent='Taime ei tuvastatud';
+     return;
+   }
+   const sci=best.species?.scientificNameWithoutAuthor||best.species?.scientificName||data.bestMatch||'Teadmata';
+   const common=(best.species?.commonNames||[])[0]||'';
+   const score=Math.round((best.score||0)*100);
+   const inv=isInvasive(sci)||isInvasive(common);
+   row.cells[1].innerHTML=`<b>${esc(common||sci)}</b><br><small>${esc(sci)} · ${score}%</small>`;
+   row.cells[2].innerHTML=inv?`<span class="red">⚠️ VÕIMALIK VÕÕRLIIK</span><br>${esc(inv[1])}`:'Ei leitud nimekirjast';
+   if(inv && gps){
+      const m=L.marker(gps).addTo(map).bindPopup(`<b>⚠️ Võimalik võõrliik</b><br>${esc(inv[1])}<br>${score}%<br>${esc(file.name)}`);
+      markers.push(m);
+      if(markers.length===1) map.setView(gps,17);
+   }
+ }catch(err){
+   row.cells[1].innerHTML=`❌ ${esc(err.message)}`;
+ }
+}
+</script>
+</body>
+</html>
